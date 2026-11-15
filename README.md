@@ -50,6 +50,7 @@ Package `geom` implements efficient geometry types for geospatial applications.
 
 * [XY](https://pkg.go.dev/github.com/twpayne/go-geom/xy) 2D geometry functions
 * [XYZ](https://pkg.go.dev/github.com/twpayne/go-geom/xyz) 3D geometry functions
+* [resample](https://pkg.go.dev/github.com/twpayne/go-geom/resample) resample time-measured XYM/XYZM trajectories onto a fixed time grid
 
 ## Protection against malicious or malformed inputs
 
