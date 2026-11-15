@@ -51,6 +51,18 @@ Package `geom` implements efficient geometry types for geospatial applications.
 * [XY](https://pkg.go.dev/github.com/twpayne/go-geom/xy) 2D geometry functions
 * [XYZ](https://pkg.go.dev/github.com/twpayne/go-geom/xyz) 3D geometry functions
 
+### Ring orientation
+
+* [`Orient`](https://pkg.go.dev/github.com/twpayne/go-geom#Orient),
+  [`OrientPolygon`](https://pkg.go.dev/github.com/twpayne/go-geom#OrientPolygon),
+  [`OrientMultiPolygon`](https://pkg.go.dev/github.com/twpayne/go-geom#OrientMultiPolygon),
+  [`OrientGeometryCollection`](https://pkg.go.dev/github.com/twpayne/go-geom#OrientGeometryCollection),
+  and
+  [`OrientLinearRing`](https://pkg.go.dev/github.com/twpayne/go-geom#OrientLinearRing)
+  return new geometries with exterior rings in a chosen direction and holes in
+  the opposite direction, preserving vertex identity, all ordinates (including
+  Z and M), the layout, and the SRID.
+
 ## Protection against malicious or malformed inputs
 
 The WKB and EWKB formats encode geometry sizes, and memory is allocated for
