@@ -39,7 +39,33 @@ func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
 		opts...,
 	)
 
-	wkbByteOrder, err := wkbcommon.ReadByte(r)
+	d := &decoder{
+		r:      r,
+		params: params,
+		budget: wkbcommon.NewReadBudget(params.ReadLimits),
+	}
+	return d.readGeometry("")
+}
+
+// A decoder holds the state shared by every geometry of a single WKB read, in
+// particular the resource budget that all nested sub-geometries draw from.
+type decoder struct {
+	r      io.Reader
+	params wkbcommon.WKBParams
+	budget *wkbcommon.ReadBudget
+}
+
+// readGeometry reads one complete geometry, including its byte order and type
+// header. path identifies the geometry within its parent and is empty for the
+// top level geometry.
+func (d *decoder) readGeometry(path string) (geom.T, error) {
+	release, err := d.budget.EnterGeometry(path)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	wkbByteOrder, err := wkbcommon.ReadByte(d.r)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +79,7 @@ func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
 		return nil, wkbcommon.ErrUnknownByteOrder(wkbByteOrder)
 	}
 
-	wkbGeometryType, err := wkbcommon.ReadUInt32(r, byteOrder)
+	wkbGeometryType, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 	if err != nil {
 		return nil, err
 	}
@@ -75,37 +101,37 @@ func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
 
 	switch t % 1000 {
 	case wkbcommon.PointID:
-		flatCoords, err := wkbcommon.ReadFlatCoords0(r, byteOrder, layout.Stride())
+		flatCoords, err := wkbcommon.ReadFlatCoords0(d.r, byteOrder, layout.Stride(), d.budget, path)
 		if err != nil {
 			return nil, err
 		}
-		if params.EmptyPointHandling == wkbcommon.EmptyPointHandlingNaN {
+		if d.params.EmptyPointHandling == wkbcommon.EmptyPointHandlingNaN {
 			return geom.NewPointFlatMaybeEmpty(layout, flatCoords), nil
 		}
 		return geom.NewPointFlat(layout, flatCoords), nil
 	case wkbcommon.LineStringID:
-		flatCoords, err := wkbcommon.ReadFlatCoords1(r, byteOrder, layout.Stride())
+		flatCoords, err := wkbcommon.ReadFlatCoords1(d.r, byteOrder, layout.Stride(), d.budget, path)
 		if err != nil {
 			return nil, err
 		}
 		return geom.NewLineStringFlat(layout, flatCoords), nil
 	case wkbcommon.PolygonID:
-		flatCoords, ends, err := wkbcommon.ReadFlatCoords2(r, byteOrder, layout.Stride())
+		flatCoords, ends, err := wkbcommon.ReadFlatCoords2(d.r, byteOrder, layout.Stride(), d.budget, path)
 		if err != nil {
 			return nil, err
 		}
 		return geom.NewPolygonFlat(layout, flatCoords, ends), nil
 	case wkbcommon.MultiPointID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[1]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 1, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		mp := geom.NewMultiPoint(layout)
-		for range n {
-			g, err := Read(r, opts...)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -119,16 +145,16 @@ func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
 		}
 		return mp, nil
 	case wkbcommon.MultiLineStringID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[2]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 2, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		mls := geom.NewMultiLineString(layout)
-		for range n {
-			g, err := Read(r, opts...)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -142,16 +168,16 @@ func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
 		}
 		return mls, nil
 	case wkbcommon.MultiPolygonID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[3]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 3, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		mp := geom.NewMultiPolygon(layout)
-		for range n {
-			g, err := Read(r, opts...)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -165,13 +191,16 @@ func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
 		}
 		return mp, nil
 	case wkbcommon.GeometryCollectionID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
+		}
 		gc := geom.NewGeometryCollection()
-		for range n {
-			g, err := Read(r, opts...)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}

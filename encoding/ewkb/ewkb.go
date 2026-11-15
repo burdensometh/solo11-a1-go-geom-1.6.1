@@ -9,6 +9,7 @@ package ewkb
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 
 	"github.com/twpayne/go-geom"
@@ -29,8 +30,36 @@ const (
 )
 
 // Read reads an arbitrary geometry from r.
-func Read(r io.Reader) (geom.T, error) {
-	ewkbByteOrder, err := wkbcommon.ReadByte(r)
+func Read(r io.Reader, opts ...wkbcommon.WKBOption) (geom.T, error) {
+	params := wkbcommon.InitWKBParams(wkbcommon.WKBParams{}, opts...)
+
+	d := &decoder{
+		r:      r,
+		params: params,
+		budget: wkbcommon.NewReadBudget(params.ReadLimits),
+	}
+	return d.readGeometry("")
+}
+
+// A decoder holds the state shared by every geometry of a single EWKB read, in
+// particular the resource budget that all nested sub-geometries draw from.
+type decoder struct {
+	r      io.Reader
+	params wkbcommon.WKBParams
+	budget *wkbcommon.ReadBudget
+}
+
+// readGeometry reads one complete geometry, including its byte order and type
+// header. path identifies the geometry within its parent and is empty for the
+// top level geometry.
+func (d *decoder) readGeometry(path string) (geom.T, error) {
+	release, err := d.budget.EnterGeometry(path)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	ewkbByteOrder, err := wkbcommon.ReadByte(d.r)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +73,7 @@ func Read(r io.Reader) (geom.T, error) {
 		return nil, wkbcommon.ErrUnknownByteOrder(ewkbByteOrder)
 	}
 
-	ewkbGeometryType, err := wkbcommon.ReadUInt32(r, byteOrder)
+	ewkbGeometryType, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +95,7 @@ func Read(r io.Reader) (geom.T, error) {
 
 	var srid uint32
 	if ewkbGeometryType&ewkbSRID != 0 {
-		srid, err = wkbcommon.ReadUInt32(r, byteOrder)
+		srid, err = wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -74,34 +103,34 @@ func Read(r io.Reader) (geom.T, error) {
 
 	switch t &^ (ewkbZ | ewkbM | ewkbSRID) {
 	case wkbcommon.PointID:
-		flatCoords, err := wkbcommon.ReadFlatCoords0(r, byteOrder, layout.Stride())
+		flatCoords, err := wkbcommon.ReadFlatCoords0(d.r, byteOrder, layout.Stride(), d.budget, path)
 		if err != nil {
 			return nil, err
 		}
 		return geom.NewPointFlatMaybeEmpty(layout, flatCoords).SetSRID(int(srid)), nil
 	case wkbcommon.LineStringID:
-		flatCoords, err := wkbcommon.ReadFlatCoords1(r, byteOrder, layout.Stride())
+		flatCoords, err := wkbcommon.ReadFlatCoords1(d.r, byteOrder, layout.Stride(), d.budget, path)
 		if err != nil {
 			return nil, err
 		}
 		return geom.NewLineStringFlat(layout, flatCoords).SetSRID(int(srid)), nil
 	case wkbcommon.PolygonID:
-		flatCoords, ends, err := wkbcommon.ReadFlatCoords2(r, byteOrder, layout.Stride())
+		flatCoords, ends, err := wkbcommon.ReadFlatCoords2(d.r, byteOrder, layout.Stride(), d.budget, path)
 		if err != nil {
 			return nil, err
 		}
 		return geom.NewPolygonFlat(layout, flatCoords, ends).SetSRID(int(srid)), nil
 	case wkbcommon.MultiPointID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[1]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 1, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		mp := geom.NewMultiPoint(layout).SetSRID(int(srid))
-		for range n {
-			g, err := Read(r)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -115,16 +144,16 @@ func Read(r io.Reader) (geom.T, error) {
 		}
 		return mp, nil
 	case wkbcommon.MultiLineStringID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[2]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 2, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		mls := geom.NewMultiLineString(layout).SetSRID(int(srid))
-		for range n {
-			g, err := Read(r)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -138,16 +167,16 @@ func Read(r io.Reader) (geom.T, error) {
 		}
 		return mls, nil
 	case wkbcommon.MultiPolygonID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[3]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 3, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		mp := geom.NewMultiPolygon(layout).SetSRID(int(srid))
-		for range n {
-			g, err := Read(r)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -161,16 +190,16 @@ func Read(r io.Reader) (geom.T, error) {
 		}
 		return mp, nil
 	case wkbcommon.GeometryCollectionID:
-		n, err := wkbcommon.ReadUInt32(r, byteOrder)
+		n, err := wkbcommon.ReadUInt32(d.r, byteOrder)
 		if err != nil {
 			return nil, err
 		}
-		if limit := wkbcommon.MaxGeometryElements[1]; limit >= 0 && int(n) > limit {
-			return nil, wkbcommon.ErrGeometryTooLarge{Level: 1, N: int(n), Limit: limit}
+		if err := d.budget.AddMembers(n, path); err != nil {
+			return nil, err
 		}
 		gc := geom.NewGeometryCollection().SetSRID(int(srid))
-		for range n {
-			g, err := Read(r)
+		for i := range n {
+			g, err := d.readGeometry(wkbcommon.JoinPath(path, fmt.Sprintf("member %d", i)))
 			if err != nil {
 				return nil, err
 			}
@@ -192,8 +221,8 @@ func Read(r io.Reader) (geom.T, error) {
 }
 
 // Unmarshal unmrshals an arbitrary geometry from a []byte.
-func Unmarshal(data []byte) (geom.T, error) {
-	return Read(bytes.NewBuffer(data))
+func Unmarshal(data []byte, opts ...wkbcommon.WKBOption) (geom.T, error) {
+	return Read(bytes.NewBuffer(data), opts...)
 }
 
 // Write writes an arbitrary geometry to w.

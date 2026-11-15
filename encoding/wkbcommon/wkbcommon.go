@@ -60,35 +60,6 @@ func (e ErrUnexpectedType) Error() string {
 	return fmt.Sprintf("wkb: got %T, want %T", e.Got, e.Want)
 }
 
-// MaxGeometryElements is the maximum number of elements that will be decoded
-// at different levels. Its primary purpose is to prevent corrupt inputs from
-// causing excessive memory allocations (which could be used as a denial of
-// service attack).
-//
-// This is a variable, so you can override it in your application code by
-// importing the `github.com/twpayne/go-geom/encoding/wkbcommon` module and
-// setting the value of `wkbcommon.MaxGeometryElements`.
-//
-// FIXME This should be Codec-specific, not global.
-// FIXME Consider overall per-geometry limit rather than per-level limit.
-var MaxGeometryElements = [4]int{
-	0,  // Unused
-	-1, // LineString, LinearRing, and MultiPoint
-	-1, // MultiLineString and Polygon
-	-1, // MultiPolygon
-}
-
-// An ErrGeometryTooLarge is returned when the geometry is too large.
-type ErrGeometryTooLarge struct {
-	Level int
-	N     int
-	Limit int
-}
-
-func (e ErrGeometryTooLarge) Error() string {
-	return fmt.Sprintf("wkb: number of elements at level %d (%d) exceeds %d", e.Level, e.N, e.Limit)
-}
-
 // Geometry type IDs.
 const (
 	PointID              = 1
@@ -104,7 +75,11 @@ const (
 )
 
 // ReadFlatCoords0 reads flat coordinates 0.
-func ReadFlatCoords0(r io.Reader, byteOrder binary.ByteOrder, stride int) ([]float64, error) {
+func ReadFlatCoords0(r io.Reader, byteOrder binary.ByteOrder, stride int, budget *ReadBudget, path string) ([]float64, error) {
+	// A point is one coordinate tuple: reserve it before allocating.
+	if err := budget.AddCoordinates(1, stride, path); err != nil {
+		return nil, err
+	}
 	coord := make([]float64, stride)
 	if err := ReadFloatArray(r, byteOrder, coord); err != nil {
 		return nil, err
@@ -113,13 +88,15 @@ func ReadFlatCoords0(r io.Reader, byteOrder binary.ByteOrder, stride int) ([]flo
 }
 
 // ReadFlatCoords1 reads flat coordinates 1.
-func ReadFlatCoords1(r io.Reader, byteOrder binary.ByteOrder, stride int) ([]float64, error) {
+func ReadFlatCoords1(r io.Reader, byteOrder binary.ByteOrder, stride int, budget *ReadBudget, path string) ([]float64, error) {
 	n, err := ReadUInt32(r, byteOrder)
 	if err != nil {
 		return nil, err
 	}
-	if limit := MaxGeometryElements[1]; limit >= 0 && int(n) > limit {
-		return nil, ErrGeometryTooLarge{Level: 1, N: int(n), Limit: limit}
+	// Check the budget, including for overflow when multiplying by stride,
+	// before allocating.
+	if err := budget.AddCoordinates(n, stride, path); err != nil {
+		return nil, err
 	}
 	flatCoords := make([]float64, int(n)*stride)
 	if err := ReadFloatArray(r, byteOrder, flatCoords); err != nil {
@@ -129,18 +106,21 @@ func ReadFlatCoords1(r io.Reader, byteOrder binary.ByteOrder, stride int) ([]flo
 }
 
 // ReadFlatCoords2 reads flat coordinates 2.
-func ReadFlatCoords2(r io.Reader, byteOrder binary.ByteOrder, stride int) ([]float64, []int, error) {
+func ReadFlatCoords2(r io.Reader, byteOrder binary.ByteOrder, stride int, budget *ReadBudget, path string) ([]float64, []int, error) {
 	n, err := ReadUInt32(r, byteOrder)
 	if err != nil {
 		return nil, nil, err
 	}
-	if limit := MaxGeometryElements[2]; limit >= 0 && int(n) > limit {
-		return nil, nil, ErrGeometryTooLarge{Level: 2, N: int(n), Limit: limit}
+	// n is the number of rings (members): reserve them before allocating the
+	// ends slice.
+	if err := budget.AddMembers(n, path); err != nil {
+		return nil, nil, err
 	}
 	var flatCoordss []float64
 	ends := make([]int, n)
 	for i := range n {
-		flatCoords, err := ReadFlatCoords1(r, byteOrder, stride)
+		ringPath := JoinPath(path, fmt.Sprintf("ring %d", i))
+		flatCoords, err := ReadFlatCoords1(r, byteOrder, stride, budget, ringPath)
 		if err != nil {
 			return nil, nil, err
 		}

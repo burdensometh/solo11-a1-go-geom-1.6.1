@@ -2,6 +2,7 @@ package wkb
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -360,13 +361,9 @@ func BenchmarkMarshal(b *testing.B) {
 }
 
 func TestCrashes(t *testing.T) {
-	// FIXME this test modifies a global variable. It will be racy if tests are
-	// run in parallel.
-	savedMaxGeometryElements := wkbcommon.MaxGeometryElements
-	defer func() {
-		wkbcommon.MaxGeometryElements = savedMaxGeometryElements
-	}()
-	wkbcommon.MaxGeometryElements[1] = 1 << 20
+	// This corrupt polygon declares a ring with 1946157063 points. With a
+	// per-read coordinate budget it must be rejected before any allocation,
+	// and the error must identify the offending ring.
 	for _, tc := range []struct {
 		s    string
 		want error
@@ -390,12 +387,22 @@ func TestCrashes(t *testing.T) {
 				"\x81\x10h!N\xdcf\n\xf0-\xeaL\x02\xba\xe9\x03\xd6/G\xc2" +
 				"\x1cj\r\xd8 \xbc\xd6r\x05աTS\xb3\xa5\xdc\xd8\xfb\")" +
 				"\xab\x19\xf7̏\x8a\x9f9\x81\x10h!N\xdcf\n\xf0-\xeaL",
-			want: wkbcommon.ErrGeometryTooLarge{Level: 1, N: 1946157063, Limit: wkbcommon.MaxGeometryElements[1]},
+			want: wkbcommon.ErrLimitExceeded{
+				What:      "coordinates",
+				Path:      "ring 0",
+				Requested: 1946157063,
+				Used:      0,
+				Limit:     1 << 20,
+			},
 		},
 	} {
 		t.Run(tc.s, func(t *testing.T) {
-			_, err := Unmarshal([]byte(tc.s))
+			_, err := Unmarshal([]byte(tc.s), wkbcommon.WKBOptionReadLimits(wkbcommon.ReadLimits{
+				MaxCoordinates: 1 << 20,
+			}))
 			assert.Equal(t, tc.want, err)
+			var limitErr wkbcommon.ErrLimitExceeded
+			assert.True(t, errors.As(err, &limitErr))
 		})
 	}
 }

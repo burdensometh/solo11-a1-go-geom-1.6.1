@@ -60,8 +60,26 @@ against the server. For example, a client might send a `MultiPoint` with header
 indicating that it contains 2^32-1 points. This will result in the server
 reading that geometry to allocate 2 × `sizeof(float64)` × (2^32-1) = 64GB of
 memory to store those points. By default, malicious or malformed input
-protection is disabled, but can be enabled by setting positive values for
-`wkbcommon.MaxGeometryElements`.
+protection is disabled, but can be enabled by passing a
+`wkbcommon.ReadLimits` to `wkbcommon.WKBOptionReadLimits` when reading:
+
+```go
+g, err := wkb.Unmarshal(data, wkbcommon.WKBOptionReadLimits(wkbcommon.ReadLimits{
+    MaxCoordinates: 1 << 20, // total coordinate tuples across the whole geometry
+    MaxMembers:     1 << 16, // total collection members across every level
+    MaxDepth:       32,      // maximum nesting depth
+}))
+```
+
+Each read gets its own independent budget: nested sub-geometries share the
+remaining budget of that read, but different reads never interfere and the
+limits are safe to use concurrently. Counts are checked for overflow (including
+when a count is multiplied by the coordinate stride) and every limit is
+enforced before the corresponding memory is allocated. A geometry that exceeds
+a limit is rejected in full with an error identifying the offending member;
+sub-geometries are never silently dropped. Limits of zero or below mean
+"unlimited". The same option is accepted by `wkb.Read`, `ewkb.Read`,
+`wkbhex.Decode`, and `ewkbhex.Decode`.
 
 ## Related libraries
 

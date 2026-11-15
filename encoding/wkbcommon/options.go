@@ -14,6 +14,7 @@ const (
 // WKBParams are parameters for encoding and decoding WKB items.
 type WKBParams struct {
 	EmptyPointHandling EmptyPointHandling
+	ReadLimits         ReadLimits
 }
 
 // WKBOption is an option to set on WKBParams.
@@ -23,6 +24,15 @@ type WKBOption func(WKBParams) WKBParams
 func WKBOptionEmptyPointHandling(h EmptyPointHandling) WKBOption {
 	return func(p WKBParams) WKBParams {
 		p.EmptyPointHandling = h
+		return p
+	}
+}
+
+// WKBOptionReadLimits sets the per-read resource limits. The limits apply to a
+// single Read or Unmarshal call and are independent of every other call.
+func WKBOptionReadLimits(limits ReadLimits) WKBOption {
+	return func(p WKBParams) WKBParams {
+		p.ReadLimits = limits
 		return p
 	}
 }
