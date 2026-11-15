@@ -50,6 +50,7 @@ Package `geom` implements efficient geometry types for geospatial applications.
 
 * [XY](https://pkg.go.dev/github.com/twpayne/go-geom/xy) 2D geometry functions
 * [XYZ](https://pkg.go.dev/github.com/twpayne/go-geom/xyz) 3D geometry functions
+* [convert](https://pkg.go.dev/github.com/twpayne/go-geom/convert) explicit, contract-driven conversion between layouts and SRID labels
 
 ## Protection against malicious or malformed inputs
 
